@@ -1,8 +1,20 @@
 # text2talk
-make a japanese voice sound to use moive voice
+make a japanese voice sound to append moive by open-jtalk library
 
-## library
-openjtalk1.11  
-https://github.com/faiface/beep  
-https://github.com/Equanox/gotron  
+## Installation
+OS X :
+```sh
+brew install open-jtalk
+```
 
+## Usage example
+1.Set a configuration of cofnig.toml
+    Please use your favorite font file of ttf.
+
+## Development setup
+
+### voice sample
+http://mahoro-ba.net/index.php?j=1875
+
+
+## Meta
