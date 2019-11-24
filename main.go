@@ -2,13 +2,15 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
-	"github.com/davecgh/go-spew/spew"
+	"github.com/disintegration/imaging"
 	"github.com/fogleman/gg"
 	"github.com/mattn/go-pipeline"
 	"github.com/spf13/viper"
@@ -29,7 +31,6 @@ func init() {
 		panic(fmt.Errorf("Cannot Unmarshal config file:%s", err))
 	}
 	fmt.Println("config info")
-	spew.Dump(config)
 	fmt.Println("\n config end")
 }
 
@@ -37,10 +38,9 @@ var config viperConfig
 
 type viperConfig struct {
 	Image struct {
-		Height   int
-		Width    int
-		TextTtf  string
-		FontSize float64
+		BaseHeight int
+		BaseWidth  int
+		TextTtf    string
 	}
 	Openjtalk struct {
 		Dict string
@@ -54,14 +54,13 @@ type viperConfig struct {
 	}
 	Voice struct {
 		Hts              []string
-		Rgb              [][]float64
+		Rgb              [][]int
 		NewLineReplacers []string
+		Images           []string
 	}
 }
 
-// TODO テキストとその秒数を表示する。
-// TODO 字幕テキストも自動で作りたい。ついで画像も入れたい画像を合成する.
-// 話すキャラ毎の色分けしたい
+// 1行の文字数が多い時は二段にする
 // 並列処理でいい感じにしたい...
 func main() {
 	text, err := readText(config.ReadText.FilePath)
@@ -89,10 +88,10 @@ func main() {
 		if text == "" {
 			continue
 		}
-		outFileOrg := outDir + strconv.Itoa(k) + "_" + getHeadText(text)
-		outFileWav := outFileOrg + ".wav"
-		outFileImg := outFileOrg + ".png"
-		cmdText, err := createVoice(text, outFileWav, voiceIndex)
+		outFileBase := outDir + strconv.Itoa(k) + "_" + getHeadText(text)
+		outWavFile := outFileBase + ".wav"
+		outImgFile := outFileBase + ".png"
+		cmdText, err := createVoice(text, outWavFile, voiceIndex)
 
 		if err != nil {
 			panic(err)
@@ -103,31 +102,88 @@ func main() {
 			panic(err)
 		}
 		cmd.Wait()
-		err = createImage(text, outFileImg, voiceIndex)
+		err = createImage(text, outImgFile, voiceIndex)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Println("file created :", outFileImg)
+		fmt.Println("file created :", outImgFile)
 	}
 }
 
+// TODO 画像設定の読み込みは効率よくする。
 func createImage(text, outPath string, voiceIndex int) error {
-	dc := gg.NewContext(config.Image.Width, config.Image.Height)
+	dc := gg.NewContext(config.Image.BaseWidth, config.Image.BaseHeight)
 	dc.SetRGBA(0, 0, 0, 0)
 	dc.Clear()
-	dc.SetRGB(config.Voice.Rgb[voiceIndex][0], config.Voice.Rgb[voiceIndex][1], config.Voice.Rgb[voiceIndex][2])
+	dc.SetRGB255(config.Voice.Rgb[voiceIndex][0], config.Voice.Rgb[voiceIndex][1], config.Voice.Rgb[voiceIndex][2])
 
-	if err := dc.LoadFontFace(config.Image.TextTtf, config.Image.FontSize); err != nil {
+	if err := dc.LoadFontFace(config.Image.TextTtf, getFontPoint(config.Image.BaseHeight)); err != nil {
 		panic(err)
 	}
-	dc.DrawStringAnchored(text, float64(config.Image.Width)/2, float64(config.Image.Height)/2, 0.5, 0.5)
+
+	if len(config.Voice.Images) > voiceIndex {
+		faceImage, err := readImage(config.Voice.Images[voiceIndex])
+		if err != nil {
+			return err
+		}
+		faceImage = imaging.Resize(faceImage, config.Image.BaseWidth/5, config.Image.BaseWidth/5, imaging.Lanczos)
+		dc.DrawImageAnchored(faceImage, 0, config.Image.BaseHeight/12, float64(0.0), float64(0.0))
+		fmt.Println("draw face finished")
+	}
+	err := drawText(dc, text, config.Image.BaseWidth, config.Image.BaseHeight)
+	if err != nil {
+		panic(err)
+	}
 	return dc.SavePNG(outPath)
 }
 
-func createVoice(text, outFilePaht string, voiceIndex int) (string, error) {
+// 文字はのフォントサイズを出力する
+// 出力画像の1/3にして
+func getFontPoint(height int) (points float64) {
+	return getFontSizeFromImageHeight(height) * 96 / 72
+}
+func getFontSizeFromImageHeight(height int) float64 {
+	return float64(height) / 6
+}
+func drawText(dc *gg.Context, text string, width, height int) (err error) {
+	// 文字量が多い時は2行にする。
+	textCount := utf8.RuneCountInString(text)
+	// 文字の大きさ
+	charSize := getFontSizeFromImageHeight(height)
+	// 横に入りきる文字数を計算
+	maxWidthChar := width * 4 / 5 / int(charSize)
+	//最大横幅より文字数が少ない時はそのまま書き込む
+	if textCount < maxWidthChar {
+		dc.DrawString(text, float64(width)*0.22, charSize*3)
+		return
+	}
+	// 2倍よりも多い時はエラーにする
+	if textCount > maxWidthChar*2 {
+		panic("too long 1 line text:" + text)
+	}
+	line1, line2 := get2LineText(text, maxWidthChar)
+	// 2倍以下の時は2段にする
+	dc.DrawString(line1, float64(width)*0.22, charSize*2)
+	dc.DrawString(line2, float64(width)*0.22, charSize*4)
+	return
+}
+
+const endPunctuation = "。"
+const readingPunctuation = "、"
+
+func get2LineText(text string, maxChar int) (line1, line2 string) {
+	// 「。」がある時は「。」で区切る
+	if strings.Contains(text, endPunctuation) {
+		lines := strings.SplitN(text, endPunctuation, 2)
+		return lines[0] + endPunctuation, lines[1]
+	}
+	return text, ""
+}
+
+func createVoice(text, outFilePath string, voiceIndex int) (string, error) {
 	cmdText, err := pipeline.Output(
 		[]string{"echo", text},
-		[]string{"/usr/local/bin/open_jtalk", "-x", config.Openjtalk.Dict, "-m", config.Voice.Hts[voiceIndex], "-ow", outFilePaht},
+		[]string{"/usr/local/bin/open_jtalk", "-x", config.Openjtalk.Dict, "-m", config.Voice.Hts[voiceIndex], "-ow", outFilePath},
 	)
 	return string(cmdText), err
 }
@@ -151,4 +207,9 @@ func readText(filePath string) (result string, err error) {
 	// 一気に全部読み取り
 	b, err := ioutil.ReadAll(file)
 	return string(b), err
+}
+
+func readImage(filePath string) (result image.Image, err error) {
+	result, err = imaging.Open(filePath)
+	return
 }

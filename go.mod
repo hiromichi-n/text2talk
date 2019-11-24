@@ -3,6 +3,7 @@ module github.com/hiromichi-n/text2talk
 go 1.13
 
 require (
+	github.com/disintegration/imaging v1.6.1 // indirect
 	github.com/fogleman/gg v1.3.0
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/mattn/go-pipeline v0.0.0-20190323144519-32d779b32768
